@@ -1,0 +1,7 @@
+*.cmx
+*.o
+*.cmi
+star.log
+main
+zig-cache/
+zig-out/

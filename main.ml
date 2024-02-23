@@ -16,19 +16,17 @@ let _ =
     flush Editor.log_file
   with
   | Failure str ->
-      log "";
-      flush Editor.log_file;
       Terminal.pop_term ();
       Terminal.show_cursor ();
       Terminal.exit_raw ();
-      print_endline str;
-      Printexc.print_backtrace stdout
-  | _ ->
-      Rope.print_rope Editor.log_file 0 editor.text;
-      log "";
-      flush Editor.log_file;
+      Printexc.print_backtrace Editor.log_file;
+      flush Editor.log_file
+  | _ as e->
       Terminal.pop_term ();
       Terminal.show_cursor ();
       Terminal.exit_raw ();
-      Printexc.print_backtrace stdout
+      let str = Printexc.to_string e in
+      output_string Editor.log_file str;
+      log "hi";
+      flush Editor.log_file
 

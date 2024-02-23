@@ -10,7 +10,7 @@ type buffer = {
 
 module Buffer = struct
   let create () =
-    { internal = Bytes.make 400 '_'; start = 400 / 2; len = 0; size = 400 }
+    { internal = Bytes.make 50 '_'; start = 50 / 2; len = 0; size = 50 }
 
   let from_str str start len =
     let b = create () in
@@ -424,11 +424,14 @@ let insert_char_leaf s c i =
   else if RString.can_append i 1 s then OneOf (Leaf (RString.append_char c s))
     (*s.start + s.len = b.start + b.len*)
   else if s.start + s.len = b.start + b.len then (
-    let b2 = Buffer.from_bytes b.internal s.start i in
-    Buffer.append_char c b2;
+    let b1 = Buffer.from_bytes b.internal s.start i in
+    let b2 = Buffer.from_bytes b.internal (s.start + i) (s.len - i) in
+    if s.start + s.len = b1.start + b1.len then Buffer.append_char c b2
+    else Buffer.append_char c b1;
+
     TwoOf
-      ( Leaf { internal = b2; start = b2.start; len = b2.len },
-        Leaf { internal = b; start = s.start + i; len = s.len - i } ))
+      ( Leaf { internal = b1; start = b1.start; len = b1.len },
+        Leaf { internal = b2; start = b2.start; len = b2.len } ))
   else
     (*s.start = b.start*)
     let b2 = Buffer.from_bytes b.internal (s.start + i) (s.len - i) in
@@ -583,7 +586,8 @@ let rec line_len_loop i lines till r =
               (len
               + unwrap_len (line_len_loop (acc + inf.chars) lines EndTill r))
       | Part len, NoneTill ->
-          if a = 0 then
+          if a = 0 && a = ilen - 1 then Part len
+          else if a = 0 then
             End
               (len
               + unwrap_len (line_len_loop (acc + inf.chars) lines EndTill r))
