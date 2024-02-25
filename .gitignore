@@ -5,3 +5,4 @@ star.log
 main
 zig-cache/
 zig-out/
+.direnv
