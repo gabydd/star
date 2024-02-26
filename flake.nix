@@ -1,5 +1,5 @@
 {
-  description = "A prisma test project";
+  description = "star editor";
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   inputs.flake-utils.url = "github:numtide/flake-utils";
   inputs.zig.url = "github:mitchellh/zig-overlay";

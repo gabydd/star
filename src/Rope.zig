@@ -81,9 +81,9 @@ fn PageList(comptime T: type) type {
         }
 
         fn deinit(self: *Self) void {
-            var page = self.pages.first;
+            var page: ?*Self.Node = self.first;
             while (page != null) {
-                page.?.data.deinit();
+                page.?.page.deinit();
                 page = page.?.next;
             }
         }
@@ -103,47 +103,47 @@ const State = struct {
         return state;
     }
 
-    fn addLeaf(state: *State) !LeafItem {
+    fn addLeaf(state: *State) !struct { Index, *Leaf } {
         const item = try state.leafs.create();
         item.ptr.init();
         state.items += 1;
-        return .{ .index = .{ .i = item.index, .leaf = true }, .ptr = item.ptr };
+        return .{ .{ .i = item.index, .leaf = true }, item.ptr };
     }
 
-    fn getLeaf(state: State, index: Index) *Leaf {
-        return state.leafs.get(index.i);
+    fn getLeaf(state: State, index: Index) Leaf {
+        return state.leafs.get(index.i).*;
     }
 
-    fn getLeafWrite(state: *State, index: Index) !LeafItem {
+    fn getLeafWrite(state: *State, index: Index) !struct { Index, *Leaf } {
         const leaf = state.leafs.get(index.i);
         if (leaf.refs == 1) {
-            return .{ .index = index, .ptr = leaf };
+            return .{ index, leaf };
         } else {
             const item = try state.leafs.create();
             leaf.refs -= 1;
             item.ptr.init();
             item.ptr.copy(leaf);
             state.items += 1;
-            return .{ .index = .{ .i = item.index, .leaf = true }, .ptr = item.ptr };
+            return .{ .{ .i = item.index, .leaf = true }, item.ptr };
         }
     }
 
-    fn addNode(state: *State) !Index {
+    fn addNode(state: *State) !struct { Index, *Node } {
         const node = try state.nodes.addOne();
         const i = state.nodes.items.len - 1;
         node.init();
         state.items += 1;
-        return .{ .i = i, .leaf = false };
+        return .{ .{ .i = i, .leaf = false }, node };
     }
 
-    fn getNode(state: State, index: Index) *Node {
-        return &state.nodes.items[index.i];
+    fn getNode(state: State, index: Index) Node {
+        return state.nodes.items[index.i];
     }
 
-    fn getNodeWrite(state: *State, index: Index) !NodeItem {
+    fn getNodeWrite(state: *State, index: Index) !struct { Index, *Node } {
         const node: *Node = &state.nodes.items[index.i];
         if (node.refs == 1) {
-            return .{ .index = index, .ptr = node };
+            return .{ index, node };
         } else {
             const item: *Node = try state.nodes.addOne();
             const i = state.nodes.items.len - 1;
@@ -151,38 +151,38 @@ const State = struct {
             item.init();
             item.copy(node);
             state.items += 1;
-            return .{ .index = .{ .i = i, .leaf = false }, .ptr = item };
+            return .{ .{ .i = i, .leaf = false }, item };
         }
     }
 
     fn copy(state: State, index: Index) void {
-        const node = state.getNode(index);
+        const node = &state.nodes.items[index.i];
         node.refs += 1;
         for (node.children[0..node.len]) |child| {
             if (child.leaf) {
-                state.getLeaf(child).refs += 1;
+                state.leafs.get(child.i).refs += 1;
             } else {
                 state.copy(child);
             }
         }
     }
 
-    fn drop(state: State, index: Index) void {
+    fn drop(state: *State, index: Index) void {
         dropInternal(state, index);
         if (state.items == 0) {
             state.deinit();
         }
     }
 
-    fn dropInternal(state: State, index: Index) void {
-        const node = state.getNode(index);
+    fn dropInternal(state: *State, index: Index) void {
+        const node = &state.nodes.items[index.i];
         node.refs -= 1;
         if (node.refs == 0) {
             state.items -= 1;
         }
-        for (node.children) |child| {
+        for (node.children[0..node.len]) |child| {
             if (child.leaf) {
-                var leaf = state.getLeaf(child);
+                const leaf = state.leafs.get(child.i);
                 leaf.refs -= 1;
                 if (leaf.refs == 0) {
                     state.items -= 1;
@@ -193,20 +193,10 @@ const State = struct {
         }
     }
 
-    fn deinit(state: State) void {
+    fn deinit(state: *State) void {
         state.leafs.deinit();
         state.nodes.deinit();
     }
-};
-
-const LeafItem = struct {
-    index: Index,
-    ptr: *Leaf,
-};
-
-const NodeItem = struct {
-    index: Index,
-    ptr: *Node,
 };
 
 const Index = struct {
@@ -218,6 +208,7 @@ const Info = struct {
     breaks: usize,
     bytes: usize,
 };
+
 const Node = struct {
     children: [CHILDREN]Index,
     info: [CHILDREN]Info,
@@ -230,7 +221,7 @@ const Node = struct {
         node.len = 0;
     }
 
-    fn getInfo(node: *Node) Info {
+    fn getInfo(node: Node) Info {
         var info: Info = .{
             .breaks = 0,
             .bytes = 0,
@@ -241,7 +232,8 @@ const Node = struct {
         }
         return info;
     }
-    fn toString(node: *Node, state: *State, write: *Write) void {
+
+    fn toString(node: Node, state: *State, write: *Write) void {
         var buf: [MAX_BYTES]u8 = undefined;
         for (0..node.len) |i| {
             const index = node.children[i];
@@ -264,15 +256,15 @@ const Node = struct {
         }
         const pos = index - acc;
         if (node.children[i].leaf) {
-            const leaf = try state.getLeafWrite(node.children[i]);
-            leaf.ptr.insert(pos, str);
-            node.info[i] = leaf.ptr.getInfo();
-            node.children[i] = leaf.index;
+            const l_index, const leaf = try state.getLeafWrite(node.children[i]);
+            leaf.insert(pos, str);
+            node.info[i] = leaf.getInfo();
+            node.children[i] = l_index;
         } else {
-            const item = try state.getNodeWrite(node.children[i]);
-            try item.ptr.insert(state, pos, str);
-            node.info[i] = item.ptr.getInfo();
-            node.children[i] = item.index;
+            const node_index, const item = try state.getNodeWrite(node.children[i]);
+            try item.insert(state, pos, str);
+            node.info[i] = item.getInfo();
+            node.children[i] = node_index;
         }
     }
 
@@ -339,7 +331,7 @@ const Leaf = struct {
     inline fn bytes(leaf: Leaf) usize {
         return leaf.left_len + leaf.right_len;
     }
-    fn toString(leaf: *Leaf, buf: *[MAX_BYTES]u8) []u8 {
+    fn toString(leaf: Leaf, buf: *[MAX_BYTES]u8) []u8 {
         @memcpy(buf[0..leaf.left_len], leaf.buffer[0..leaf.left_len]);
         @memcpy(buf[leaf.left_len .. leaf.left_len + leaf.right_len], leaf.buffer[MAX_BYTES - leaf.right_len .. MAX_BYTES]);
         return buf[0 .. leaf.left_len + leaf.right_len];
@@ -362,12 +354,11 @@ const Leaf = struct {
 
 fn fromString(str: []const u8, alloc: Allocator) !Rope {
     const state = try State.init(alloc);
-    const root = try state.addNode();
-    const node = state.getNode(root);
-    const leaf = try state.addLeaf();
-    leaf.ptr.insert(0, str);
-    node.children[0] = leaf.index;
-    node.info[0] = leaf.ptr.getInfo();
+    const root, const node = try state.addNode();
+    const index, const leaf = try state.addLeaf();
+    leaf.insert(0, str);
+    node.children[0] = index;
+    node.info[0] = leaf.getInfo();
     node.len += 1;
     return .{
         .state = state,
@@ -394,19 +385,25 @@ fn copy(rope: Rope) Rope {
     return rope;
 }
 
+fn drop(rope: Rope) void {
+    rope.state.drop(rope.root);
+}
+
 fn insert(rope: *Rope, index: usize, str: []const u8) !void {
-    const root = try rope.state.getNodeWrite(rope.root);
-    try root.ptr.insert(rope.state, index, str);
-    rope.root = root.index;
+    const root, const node = try rope.state.getNodeWrite(rope.root);
+    try node.insert(rope.state, index, str);
+    rope.root = root;
 }
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     var rope = try Rope.fromString("hello world\n", arena.allocator());
+    defer rope.drop();
     var rope2 = rope.copy();
-    try rope.insert(5, "no");
+    defer rope2.drop();
     try rope2.insert(3, "no");
+    try rope.insert(5, "no");
     std.debug.print("{s}", .{try rope.toString(arena.allocator())});
     std.debug.print("{s}, {}", .{ try rope2.toString(arena.allocator()), rope2.root });
 }
