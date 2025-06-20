@@ -52,6 +52,30 @@ const CRDTState = struct {
     current: std.ArrayListUnmanaged(EventId),
     delete_map: std.AutoArrayHashMapUnmanaged(EventId, EventId),
     id_to_items: std.AutoArrayHashMapUnmanaged(EventId, *CRDTItem),
+    pub fn clear(state: *CRDTState, gpa: std.mem.Allocator) void {
+        for (state.items.items) |item| {
+            gpa.destroy(item);
+        }
+        state.items.clearRetainingCapacity();
+        state.current.clearRetainingCapacity();
+        state.delete_map.clearRetainingCapacity();
+        state.id_to_items.clearRetainingCapacity();
+    }
+    pub fn deinit(state: *CRDTState, gpa: std.mem.Allocator) void {
+        for (state.items.items) |item| {
+            gpa.destroy(item);
+        }
+        state.items.deinit(gpa);
+        state.current.deinit(gpa);
+        state.delete_map.deinit(gpa);
+        state.id_to_items.deinit(gpa);
+    }
+    const empty: CRDTState = .{
+        .items = .empty,
+        .current = .empty,
+        .delete_map = .empty,
+        .id_to_items = .empty,
+    };
 };
 
 pub const Agent = u64;
@@ -62,13 +86,26 @@ pub const EventGraph = struct {
     frontier: std.ArrayListUnmanaged(EventId),
     version: std.AutoArrayHashMapUnmanaged(Agent, u32),
     snapshot: TextBuffer,
+    state: CRDTState,
 
     pub const empty: EventGraph = .{
         .events = .empty,
         .frontier = .empty,
         .version = .empty,
         .snapshot = .empty,
+        .state = .empty,
     };
+
+    pub fn deinit(graph: *EventGraph, gpa: std.mem.Allocator) void {
+        for (graph.events.items) |event| {
+            gpa.free(event.parents);
+        }
+        graph.events.deinit(gpa);
+        graph.frontier.deinit(gpa);
+        graph.version.deinit(gpa);
+        graph.snapshot.deinit(gpa);
+        graph.state.deinit(gpa);
+    }
 
     pub fn addLocalOp(graph: *EventGraph, gpa: std.mem.Allocator, agent: Agent, op: Op) !void {
         try graph.version.ensureUnusedCapacity(gpa, 1);
@@ -219,46 +256,80 @@ pub const EventGraph = struct {
         }
     }
 
+    const DiffFlag = enum { a, b, shared };
+    const FlagMap = std.AutoArrayHashMapUnmanaged(EventId, DiffFlag);
+    const EventQueue = std.PriorityQueue(EventId, void, struct {
+        fn compare(_: void, a: EventId, b: EventId) std.math.Order {
+            return std.math.order(b, a);
+        }
+    }.compare);
+
+    fn enque(gpa: std.mem.Allocator, queue: *EventQueue, flags: *FlagMap, id: EventId, flag: DiffFlag, num_shared: *usize) !void {
+        const stored_flag = try flags.getOrPut(gpa, id);
+        if (stored_flag.found_existing) {
+            if (stored_flag.value_ptr.* != flag and stored_flag.value_ptr.* != .shared) {
+                stored_flag.value_ptr.* = .shared;
+                num_shared.* += 1;
+            }
+        } else {
+            stored_flag.value_ptr.* = flag;
+            try queue.add(id);
+            if (flag == .shared) {
+                num_shared.* += 1;
+            }
+        }
+    }
+
+    pub fn diff(graph: *EventGraph, gpa: std.mem.Allocator, a: []EventId, b: []EventId) !struct { std.ArrayListUnmanaged(EventId), std.ArrayListUnmanaged(EventId) } {
+        var flags: FlagMap = .empty;
+        defer flags.deinit(gpa);
+        var num_shared: usize = 0;
+
+        var queue: EventQueue = .init(gpa, {});
+        defer queue.deinit();
+        for (a) |id| {
+            try enque(gpa, &queue, &flags, id, .a, &num_shared);
+        }
+        for (b) |id| {
+            try enque(gpa, &queue, &flags, id, .b, &num_shared);
+        }
+        var a_only: std.ArrayListUnmanaged(EventId) = .empty;
+        var b_only: std.ArrayListUnmanaged(EventId) = .empty;
+
+        while (queue.items.len > num_shared) {
+            const id = queue.remove();
+            const flag = flags.get(id).?;
+            switch (flag) {
+                .shared => num_shared -= 1,
+                .a => try a_only.append(gpa, id),
+                .b => try b_only.append(gpa, id),
+            }
+            const event = graph.events.items[id];
+            for (event.parents) |parent| try enque(gpa, &queue, &flags, parent, flag, &num_shared);
+        }
+        return .{ a_only, b_only };
+    }
+
     pub fn replay(graph: *EventGraph, gpa: std.mem.Allocator) !void {
         graph.snapshot.clearRetainingCapacity();
-        var state: CRDTState = .{ .current = .empty, .delete_map = .empty, .id_to_items = .empty, .items = .empty };
+        graph.state.clear(gpa);
         for (graph.events.items, 0..) |event, i| {
-            var old: std.AutoArrayHashMapUnmanaged(EventId, void) = .empty;
-            var new: std.AutoArrayHashMapUnmanaged(EventId, void) = .empty;
-            var queue: std.ArrayListUnmanaged(EventId) = .empty;
-            try queue.appendSlice(gpa, state.current.items);
+            var a_only, var b_only = try graph.diff(gpa, graph.state.current.items, event.parents);
+            defer a_only.deinit(gpa);
+            defer b_only.deinit(gpa);
 
-            while (queue.pop()) |id| {
-                if (old.contains(id)) continue;
-                try old.put(gpa, id, {});
-                try queue.appendSlice(gpa, graph.events.items[id].parents);
+            for (a_only.items) |id| {
+                const op = graph.events.items[id].op;
+                const target_id = if (op == .ins) id else graph.state.delete_map.get(id).?;
+                const target = graph.state.id_to_items.get(target_id).?;
+                target.prepare_state.retreat();
             }
 
-            queue.clearRetainingCapacity();
-            try queue.appendSlice(gpa, event.parents);
-
-            while (queue.pop()) |id| {
-                if (new.contains(id)) continue;
-                try new.put(gpa, id, {});
-                try queue.appendSlice(gpa, graph.events.items[id].parents);
-            }
-
-            for (old.entries.items(.key)) |id| {
-                if (!new.contains(id)) {
-                    const op = graph.events.items[id].op;
-                    const target_id = if (op == .ins) id else state.delete_map.get(id).?;
-                    const target = state.id_to_items.get(target_id).?;
-                    target.prepare_state.retreat();
-                }
-            }
-
-            for (new.entries.items(.key)) |id| {
-                if (!old.contains(id)) {
-                    const op = graph.events.items[id].op;
-                    const target_id = if (op == .ins) id else state.delete_map.get(id).?;
-                    const target = state.id_to_items.get(target_id).?;
-                    target.prepare_state.advance();
-                }
+            for (b_only.items) |id| {
+                const op = graph.events.items[id].op;
+                const target_id = if (op == .ins) id else graph.state.delete_map.get(id).?;
+                const target = graph.state.id_to_items.get(target_id).?;
+                target.prepare_state.advance();
             }
 
             switch (event.op) {
@@ -267,22 +338,22 @@ pub const EventGraph = struct {
                     var idx: usize = 0;
                     var end_pos: usize = 0;
                     while (cur_pos < ins.pos) {
-                        if (state.items.items.len == 0) break;
-                        const item = state.items.items[idx];
+                        if (graph.state.items.items.len == 0) break;
+                        const item = graph.state.items.items[idx];
                         if (item.prepare_state == .inserted) cur_pos += 1;
                         if (!item.deleted) end_pos += 1;
                         idx += 1;
                     }
                     var origin_right: ?EventId = null;
-                    for (idx..state.items.items.len) |j| {
-                        const item = state.items.items[j];
+                    for (idx..graph.state.items.items.len) |j| {
+                        const item = graph.state.items.items[j];
                         if (item.prepare_state != .not_yet_inserted) {
                             origin_right = item.id;
                             break;
                         }
                     }
                     const item: *CRDTItem = try gpa.create(CRDTItem);
-                    const origin_left = if (idx != 0 and state.items.items.len != 0) state.items.items[idx - 1].id else null;
+                    const origin_left = if (idx != 0 and graph.state.items.items.len != 0) graph.state.items.items[idx - 1].id else null;
                     item.* = .{
                         .id = @intCast(i),
                         .deleted = false,
@@ -290,31 +361,31 @@ pub const EventGraph = struct {
                         .origin_left = origin_left,
                         .origin_right = origin_right,
                     };
-                    try graph.integrate(&state, gpa, item, idx, end_pos);
-                    try state.id_to_items.put(gpa, @intCast(i), item);
+                    try graph.integrate(&graph.state, gpa, item, idx, end_pos);
+                    try graph.state.id_to_items.put(gpa, @intCast(i), item);
                 },
                 .del => |del| {
                     var cur_pos: usize = 0;
                     var idx: usize = 0;
                     var end_pos: usize = 0;
-                    while (cur_pos < del.pos or state.items.items[idx].prepare_state != .inserted) {
-                        const item = state.items.items[idx];
+                    while (cur_pos < del.pos or graph.state.items.items[idx].prepare_state != .inserted) {
+                        const item = graph.state.items.items[idx];
                         if (item.prepare_state == .inserted) cur_pos += 1;
                         if (!item.deleted) end_pos += 1;
                         idx += 1;
                     }
-                    const item = state.items.items[idx];
+                    const item = graph.state.items.items[idx];
                     if (!item.deleted) {
                         item.deleted = true;
                         _ = graph.snapshot.orderedRemove(end_pos);
                     }
                     item.prepare_state = @enumFromInt(2);
-                    try state.delete_map.put(gpa, @intCast(i), item.id);
+                    try graph.state.delete_map.put(gpa, @intCast(i), item.id);
                 },
             }
-            state.current.clearRetainingCapacity();
-            try state.current.ensureTotalCapacity(gpa, 1);
-            state.current.appendAssumeCapacity(@intCast(i));
+            graph.state.current.clearRetainingCapacity();
+            try graph.state.current.ensureTotalCapacity(gpa, 1);
+            graph.state.current.appendAssumeCapacity(@intCast(i));
         }
     }
 };
