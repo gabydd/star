@@ -2,8 +2,11 @@ const star = @import("./root.zig");
 const std = @import("std");
 
 test "fuzz" {
-    for (0..20) |i| {
-        try fuzz(i, std.testing.allocator);
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const alloc = gpa.allocator();
+    defer _ = gpa.deinit();
+    for (0..100) |i| {
+        try fuzz(i, alloc);
     }
 }
 
@@ -29,20 +32,16 @@ fn fuzz(seed: u64, gpa: std.mem.Allocator) !void {
                 const char = random.intRangeAtMost(u8, 'a', 'z');
                 const pos = random.uintLessThan(u32, len + 1);
                 try doc[1].insert(gpa, doc[0], pos, &.{char});
-                try doc[1].replay(gpa);
             } else {
                 const pos = random.uintLessThan(u32, len);
                 try doc[1].delete(gpa, doc[0], pos, 1);
-                try doc[1].replay(gpa);
             }
         }
         const a = &docs[random.uintLessThan(u32, docs.len)];
         const b = &docs[random.uintLessThan(u32, docs.len)];
         if (a != b) {
             try a[1].merge(gpa, b[1]);
-            try a[1].replay(gpa);
             try b[1].merge(gpa, a[1]);
-            try b[1].replay(gpa);
             try std.testing.expectEqual(a[1].frontier.items.len, b[1].frontier.items.len);
             try std.testing.expectEqual(a[1].version.get(a[0]), b[1].version.get(a[0]));
             try std.testing.expectEqual(a[1].version.get(b[0]), b[1].version.get(b[0]));
