@@ -55,4 +55,28 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
+
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+
+    const wasm_mod = b.createModule(.{
+        .root_source_file = b.path("src/wasm.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+    });
+    wasm_mod.addImport("star", lib_mod);
+    const wasm = b.addExecutable(.{
+        .name = "star",
+        .root_module = wasm_mod,
+    });
+    wasm.import_symbols = true;
+    wasm.entry = .disabled;
+    wasm.rdynamic = true;
+
+    const wasm_step = b.step("wasm", "build wasm module");
+    const install_file = b.addInstallFile(wasm.getEmittedBin(), "../web/star.wasm");
+    wasm_step.dependOn(&install_file.step);
 }

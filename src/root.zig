@@ -391,44 +391,176 @@ pub const EventGraph = struct {
 
     pub fn replay(graph: *EventGraph, gpa: std.mem.Allocator, frontier: []EventId) !void {
         graph.state.clear(gpa);
-        var snapshot_set: std.AutoArrayHashMapUnmanaged(EventId, void) = .empty;
-        var new_set: std.AutoArrayHashMapUnmanaged(EventId, void) = .empty;
-        var queue: std.ArrayListUnmanaged(EventId) = .empty;
-        try queue.appendSlice(gpa, frontier);
+        var a_only, var b_only, var version = try graph.partial(gpa, frontier, graph.frontier.items);
+        defer a_only.deinit(gpa);
+        defer b_only.deinit(gpa);
+        defer version.deinit(gpa);
 
-        const C = struct {
-            keys: []EventId,
-
-            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
-                return ctx.keys[a_index] < ctx.keys[b_index];
-            }
-        };
-
-        while (queue.pop()) |id| {
-            if (snapshot_set.contains(id)) continue;
-            try snapshot_set.put(gpa, id, {});
-            try queue.appendSlice(gpa, graph.events.items[id].parents);
+        for (0..version.items.len) |i| {
+            try graph.state.current.append(gpa, version.items[version.items.len - i - 1]);
         }
-        queue.clearRetainingCapacity();
-        try queue.appendSlice(gpa, graph.frontier.items);
-        while (queue.pop()) |id| {
-            if (new_set.contains(id)) continue;
-            try new_set.put(gpa, id, {});
-            try queue.appendSlice(gpa, graph.events.items[id].parents);
-        }
-        snapshot_set.sort(C{ .keys = snapshot_set.keys() });
-        new_set.sort(C{ .keys = new_set.keys() });
 
-        for (snapshot_set.keys()) |id| {
+        const placeholder_len = if (frontier.len == 0) 1 else std.mem.max(EventId, frontier) + 1;
+        for (0..placeholder_len) |i| {
+            const item = try gpa.create(CRDTItem);
+            item.* = .{
+                .id = @intCast(i + 1000000000),
+                .origin_left = null,
+                .origin_right = null,
+                .deleted = false,
+                .prepare_state = .inserted,
+            };
+            try graph.state.items.append(gpa, item);
+            try graph.state.id_to_items.put(gpa, item.id, item);
+        }
+
+        for (0..a_only.items.len) |i| {
+            const id = a_only.items[a_only.items.len - i - 1];
             try graph.replayEvent(gpa, id, null);
         }
-        for (new_set.keys()) |id| {
-            if (!snapshot_set.contains(id)) {
-                try graph.replayEvent(gpa, id, &graph.snapshot);
+
+        for (0..b_only.items.len) |i| {
+            const id = b_only.items[b_only.items.len - i - 1];
+            try graph.replayEvent(gpa, id, &graph.snapshot);
+        }
+    }
+
+    const PartialFlag = enum { a, b, shared };
+    const PartialFlagMap = std.AutoArrayHashMapUnmanaged(EventId, PartialFlag);
+
+    fn enquePartial(gpa: std.mem.Allocator, queue: *EventQueue, flags: *PartialFlagMap, id: EventId, flag: PartialFlag, num_versions: *u32) !void {
+        const stored_flag = try flags.getOrPut(gpa, id);
+        if (stored_flag.found_existing) {
+            if (stored_flag.value_ptr.* != flag and stored_flag.value_ptr.* != .shared) {
+                stored_flag.value_ptr.* = .shared;
+                num_versions.* += 1;
+            }
+        } else {
+            stored_flag.value_ptr.* = flag;
+            try queue.add(id);
+            if (flag == .shared) {
+                num_versions.* += 1;
+            }
+        }
+    }
+
+    pub fn partial(graph: *EventGraph, gpa: std.mem.Allocator, a: []EventId, b: []EventId) !struct { std.ArrayListUnmanaged(EventId), std.ArrayListUnmanaged(EventId), std.ArrayListUnmanaged(EventId) } {
+        var flags: PartialFlagMap = .empty;
+        defer flags.deinit(gpa);
+
+        var num_versions: u32 = 0;
+        var queue: EventQueue = .init(gpa, {});
+        defer queue.deinit();
+        for (a) |id| {
+            try enquePartial(gpa, &queue, &flags, id, .a, &num_versions);
+        }
+        for (b) |id| {
+            if (!std.mem.containsAtLeastScalar(EventId, a, 1, id)) {
+                try enquePartial(gpa, &queue, &flags, id, .b, &num_versions);
+            }
+        }
+        var a_only: std.ArrayListUnmanaged(EventId) = .empty;
+        var b_only: std.ArrayListUnmanaged(EventId) = .empty;
+        var version: std.ArrayListUnmanaged(EventId) = .empty;
+
+        var ended: bool = false;
+        while (queue.removeOrNull()) |id| {
+            const flag = flags.get(id).?;
+            switch (flag) {
+                .shared => {
+                    if ((num_versions > queue.items.len + 1 or queue.peek() == null) and !ended) {
+                        try version.append(gpa, id);
+                        continue;
+                    } else {
+                        num_versions -= 1;
+                        try a_only.append(gpa, id);
+                    }
+                },
+                .a => try a_only.append(gpa, id),
+                .b => try b_only.append(gpa, id),
+            }
+            const event = graph.events.items[id];
+            for (event.parents) |parent| try enquePartial(gpa, &queue, &flags, parent, flag, &num_versions);
+            if (event.parents.len == 0) {
+                ended = true;
+            }
+        }
+        return .{ a_only, b_only, version };
+    }
+
+    pub fn fromBytes(gpa: std.mem.Allocator, buffer: []const u8) !EventGraph {
+        var reader: ByteReader = .{ .bytes = buffer, .offset = 0 };
+        var graph: EventGraph = .empty;
+        const len = reader.read(u32);
+        for (0..len) |_| {
+            const agent = reader.read(Agent);
+            const seq = reader.read(u32);
+            const num_parents = reader.read(u32);
+            const parents = try gpa.alloc(EventId, num_parents);
+            for (0..num_parents) |i| {
+                parents[i] = reader.read(EventId);
+            }
+            const op_type: OpType = @enumFromInt(reader.read(u8));
+            const pos = reader.read(u32);
+            const op: Op = switch (op_type) {
+                .del => .{ .del = .{ .pos = pos } },
+                .ins => .{ .ins = .{ .pos = pos, .content = reader.read(u8) } },
+            };
+            try graph.events.append(gpa, .{ .agent = agent, .seq = seq, .parents = parents, .op = op });
+        }
+        return graph;
+    }
+
+    pub fn toBytes(graph: EventGraph, gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanaged(u8)) !void {
+        try writeTo(u32, buffer, gpa, @intCast(graph.events.items.len));
+        for (graph.events.items) |event| {
+            try writeTo(Agent, buffer, gpa, event.agent);
+            try writeTo(u32, buffer, gpa, event.seq);
+            try writeTo(u32, buffer, gpa, @intCast(event.parents.len));
+            for (event.parents) |parent| {
+                try writeTo(EventId, buffer, gpa, parent);
+            }
+            switch (event.op) {
+                .del => |del| {
+                    try writeTo(u8, buffer, gpa, @intFromEnum(OpType.del));
+                    try writeTo(u32, buffer, gpa, del.pos);
+                },
+                .ins => |ins| {
+                    try writeTo(u8, buffer, gpa, @intFromEnum(OpType.ins));
+                    try writeTo(u32, buffer, gpa, ins.pos);
+                    try writeTo(u8, buffer, gpa, ins.content);
+                },
             }
         }
     }
 };
+
+const ByteReader = struct {
+    bytes: []const u8,
+    offset: u32,
+    pub fn read(reader: *ByteReader, T: type) T {
+        const bytes = @divExact(@typeInfo(T).int.bits, 8);
+        const val: T = @bitCast(reader.bytes[reader.offset..][0..bytes].*);
+        reader.offset += bytes;
+        return val;
+    }
+    pub fn readFrom(reader: *ByteReader, T: type, offset: u32) T {
+        reader.skip(offset);
+        return reader.read(T);
+    }
+    pub fn skip(reader: *ByteReader, offset: u32) void {
+        reader.offset += offset;
+    }
+    pub fn reset(reader: *ByteReader, offset: u32) void {
+        reader.offset = offset;
+    }
+};
+
+fn writeTo(T: type, buffer: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, value: T) !void {
+    const bytes = @divExact(@typeInfo(T).int.bits, 8);
+    const val: [bytes]u8 = @bitCast(value);
+    try buffer.appendSlice(alloc, &val);
+}
 
 comptime {
     _ = @import("./fuzzer.zig");

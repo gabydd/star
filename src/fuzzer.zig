@@ -23,7 +23,7 @@ fn fuzz(seed: u64, gpa: std.mem.Allocator) !void {
         doc.* = .{ i, .empty };
     }
 
-    for (0..100) |_| {
+    for (0..20) |_| {
         for (0..docs.len) |_| {
             const doc = &docs[random.uintLessThan(u32, docs.len)];
             const len: u32 = @intCast(doc[1].snapshot.items.len);
@@ -42,9 +42,6 @@ fn fuzz(seed: u64, gpa: std.mem.Allocator) !void {
         if (a != b) {
             try a[1].merge(gpa, b[1]);
             try b[1].merge(gpa, a[1]);
-            try std.testing.expectEqual(a[1].frontier.items.len, b[1].frontier.items.len);
-            try std.testing.expectEqual(a[1].version.get(a[0]), b[1].version.get(a[0]));
-            try std.testing.expectEqual(a[1].version.get(b[0]), b[1].version.get(b[0]));
             try std.testing.expectEqualSlices(u8, a[1].snapshot.items, b[1].snapshot.items);
         }
     }

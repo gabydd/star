@@ -58,7 +58,7 @@ pub fn main() !void {
 
     var cursor: u32 = 0;
     while (true) {
-        const event = loop.nextEvent();
+        var event = loop.nextEvent();
         switch (event) {
             .key_press => |key| {
                 if (key.matches('c', .{ .ctrl = true })) {
@@ -66,7 +66,6 @@ pub fn main() !void {
                 } else if (key.matches(vaxis.Key.backspace, .{})) {
                     if (cursor > 0) {
                         try graph.delete(alloc, agent, cursor - 1, 1);
-                        try graph.replay(alloc);
                         cursor -= 1;
                         if (stream) |s| try writeSocket(alloc, s, graph);
                     }
@@ -76,21 +75,19 @@ pub fn main() !void {
                     cursor = @intCast(std.math.clamp(cursor + 1, 0, graph.snapshot.items.len));
                 } else if (key.matches(vaxis.Key.enter, .{})) {
                     try graph.insert(alloc, agent, cursor, "\n");
-                    try graph.replay(alloc);
                     cursor += 1;
+                    if (stream) |s| try writeSocket(alloc, s, graph);
                 } else {
                     if (key.text) |text| {
                         try graph.insert(alloc, agent, cursor, text);
-                        try graph.replay(alloc);
                         cursor += @intCast(text.len);
                         if (stream) |s| try writeSocket(alloc, s, graph);
                     }
                 }
             },
             .winsize => |ws| try vx.resize(alloc, tty.anyWriter(), ws),
-            .graph => |other| {
-                try graph.merge(alloc, other);
-                try graph.replay(alloc);
+            .graph => |*other| {
+                try graph.merge(alloc, other.*);
                 cursor = @intCast(std.math.clamp(cursor, 0, graph.snapshot.items.len));
             },
         }
@@ -135,26 +132,8 @@ fn writeTo(T: type, buffer: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocato
 
 fn writeSocket(alloc: std.mem.Allocator, stream: std.net.Stream, graph: star.EventGraph) !void {
     var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    try writeTo(u32, &buffer, alloc, @intCast(graph.events.items.len));
-    for (graph.events.items) |event| {
-        try writeTo(star.Agent, &buffer, alloc, event.agent);
-        try writeTo(u32, &buffer, alloc, event.seq);
-        try writeTo(u32, &buffer, alloc, @intCast(event.parents.len));
-        for (event.parents) |parent| {
-            try writeTo(star.EventId, &buffer, alloc, parent);
-        }
-        switch (event.op) {
-            .del => |del| {
-                try writeTo(u8, &buffer, alloc, @intFromEnum(star.OpType.del));
-                try writeTo(u32, &buffer, alloc, del.pos);
-            },
-            .ins => |ins| {
-                try writeTo(u8, &buffer, alloc, @intFromEnum(star.OpType.ins));
-                try writeTo(u32, &buffer, alloc, ins.pos);
-                try writeTo(u8, &buffer, alloc, ins.content);
-            },
-        }
-    }
+    defer buffer.deinit(alloc);
+    try graph.toBytes(alloc, &buffer);
     try stream.writeAll(buffer.items);
 }
 
@@ -163,32 +142,14 @@ fn pollSocketServer(server: *std.net.Server, loop: *vaxis.Loop(Event), stream: *
     stream.* = peer.stream;
     try pollSocket(peer.stream, loop);
 }
+
 fn pollSocket(stream: std.net.Stream, loop: *vaxis.Loop(Event)) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const alloc = gpa.allocator();
-    const buffer = try alloc.alloc(u8, 10000);
+    const buffer = try alloc.alloc(u8, 1024 * 1024);
     while (true) {
         const size = try stream.read(buffer);
-        var reader: ByteReader = .{ .bytes = buffer[0..size], .offset = 0 };
-        var graph: star.EventGraph = .empty;
-        const len = reader.read(u32);
-        for (0..len) |_| {
-            const agent = reader.read(star.Agent);
-            const seq = reader.read(u32);
-            const num_parents = reader.read(u32);
-            const parents = try alloc.alloc(star.EventId, num_parents);
-            for (0..num_parents) |i| {
-                parents[i] = reader.read(star.EventId);
-            }
-            const op_type: star.OpType = @enumFromInt(reader.read(u8));
-            const pos = reader.read(u32);
-            const op: star.Op = switch (op_type) {
-                .del => .{ .del = .{ .pos = pos } },
-                .ins => .{ .ins = .{ .pos = pos, .content = reader.read(u8) } },
-            };
-            try graph.events.append(alloc, .{ .agent = agent, .seq = seq, .parents = parents, .op = op });
-        }
-        loop.postEvent(.{ .graph = graph });
+        loop.postEvent(.{ .graph = try .fromBytes(alloc, buffer[0..size]) });
     }
 }
 
