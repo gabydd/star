@@ -1,0 +1,25 @@
+run
++- run star
+   +- install
+      +- install star
+         +- compile exe star Debug native 1 errors
+src/main.zig:57:44: error: expected type 'u32', found 'usize'
+                    cursor = std.math.clamp(cursor - 1, 0, buffer.items.len - 1);
+                             ~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/main.zig:57:44: note: unsigned 32-bit int cannot represent all possible unsigned 64-bit values
+referenced by:
+    callMain [inlined]: /nix/store/1iwckaibc2nqg9vi4absn0b3as0ll0xn-zig-0.15.0-dev.847+850655f06/lib/std/start.zig:675:37
+    callMainWithArgs [inlined]: /nix/store/1iwckaibc2nqg9vi4absn0b3as0ll0xn-zig-0.15.0-dev.847+850655f06/lib/std/start.zig:635:20
+    posixCallMainAndExit: /nix/store/1iwckaibc2nqg9vi4absn0b3as0ll0xn-zig-0.15.0-dev.847+850655f06/lib/std/start.zig:590:36
+    2 reference(s) hidden; use '-freference-trace=5' to see all references
+error: the following command failed with 1 compilation errors:
+/nix/store/1iwckaibc2nqg9vi4absn0b3as0ll0xn-zig-0.15.0-dev.847+850655f06/bin/zig build-exe -ODebug --dep star --dep vaxis -Mroot=/home/gaby/src/star/src/main.zig -ODebug -Mstar=/home/gaby/src/star/src/root.zig -ODebug --dep code_point --dep Graphemes --dep DisplayWidth --dep zigimg -Mvaxis=/home/gaby/src/libvaxis/src/main.zig -ODebug -Mcode_point=/home/gaby/.cache/zig/p/zg-0.14.0-oGqU3KEFswIffnDu8eAE2XlhzwcfgjwtM6akIc5L7cEV/src/code_point.zig -ODebug --dep gbp --dep code_point -MGraphemes=/home/gaby/.cache/zig/p/zg-0.14.0-oGqU3KEFswIffnDu8eAE2XlhzwcfgjwtM6akIc5L7cEV/src/Graphemes.zig -ODebug --dep dwp --dep ascii --dep code_point --dep Graphemes --dep options -MDisplayWidth=/home/gaby/.cache/zig/p/zg-0.14.0-oGqU3KEFswIffnDu8eAE2XlhzwcfgjwtM6akIc5L7cEV/src/DisplayWidth.zig -Mzigimg=/home/gaby/.cache/zig/p/zigimg-0.1.0-8_eo2nWlEgCddu8EGLOM_RkYshx3sC8tWv-yYA4-htS6/zigimg.zig -Mgbp=.zig-cache/o/04c81672836926984c70b8892a431647/gbp.bin.z -Mdwp=.zig-cache/o/bb720003a04edb43f31e4ca7b1f971f2/dwp.bin.z -ODebug -Mascii=/home/gaby/.cache/zig/p/zg-0.14.0-oGqU3KEFswIffnDu8eAE2XlhzwcfgjwtM6akIc5L7cEV/src/ascii.zig -Moptions=.zig-cache/c/d95eb712259fe0b7c27b8f5c9efff27e/options.zig --cache-dir .zig-cache --global-cache-dir /home/gaby/.cache/zig --name star --zig-lib-dir /nix/store/1iwckaibc2nqg9vi4absn0b3as0ll0xn-zig-0.15.0-dev.847+850655f06/lib/ --listen=- 
+Build Summary: 5/10 steps succeeded; 1 failed
+run transitive failure
++- run star transitive failure
+   +- compile exe star Debug native 1 errors
+   +- install transitive failure
+      +- install star transitive failure
+         +- compile exe star Debug native (+3 more reused dependencies)
+error: the following build command failed with exit code 1:
+.zig-cache/o/81463a69416631252cd91829b619ebcc/build /nix/store/1iwckaibc2nqg9vi4absn0b3as0ll0xn-zig-0.15.0-dev.847+850655f06/bin/zig /nix/store/1iwckaibc2nqg9vi4absn0b3as0ll0xn-zig-0.15.0-dev.847+850655f06/lib /home/gaby/src/star .zig-cache /home/gaby/.cache/zig --seed 0xb3ed7270 -Z09e6eadad7ac9094 run

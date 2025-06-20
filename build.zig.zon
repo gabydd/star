@@ -3,7 +3,9 @@
     .version = "0.0.0",
     .fingerprint = 0xc9db5a1415d55fd2,
     .minimum_zig_version = "0.15.0-dev.155+acfdad858",
-    .dependencies = .{},
+    .dependencies = .{ .vaxis = .{
+        .path = "../libvaxis",
+    } },
     .paths = .{
         "build.zig",
         "build.zig.zon",

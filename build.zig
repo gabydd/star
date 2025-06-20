@@ -16,7 +16,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    exe_mod.addImport("star_lib", lib_mod);
+    exe_mod.addImport("star", lib_mod);
+
+    const vaxis = b.dependency("vaxis", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_mod.addImport("vaxis", vaxis.module("vaxis"));
 
     const exe = b.addExecutable(.{
         .name = "star",
