@@ -37,6 +37,10 @@ export fn cursor(wrapper: *Wrapper) u32 {
     return wrapper.graph.snapshot.cursor;
 }
 
+export fn setCursor(wrapper: *Wrapper, pos: u32) void {
+    wrapper.graph.snapshot.cursor = pos;
+}
+
 export fn insert(wrapper: *Wrapper, pos: u32, text: [*]u8, text_len: usize) void {
     wrapper.graph.insert(std.heap.wasm_allocator, wrapper.agent, pos, text[0..text_len]) catch @panic("OOM");
 }

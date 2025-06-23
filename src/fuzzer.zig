@@ -1,12 +1,19 @@
 const star = @import("./root.zig");
 const std = @import("std");
+const builtin = @import("builtin");
 
 test "fuzz" {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    const alloc = gpa.allocator();
-    defer _ = gpa.deinit();
-    for (0..100) |i| {
-        try fuzz(i, alloc);
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const gpa = if (builtin.mode == .Debug)
+        debug_allocator.allocator()
+    else
+        std.heap.smp_allocator;
+    defer {
+        if (builtin.mode == .Debug) _ = debug_allocator.deinit();
+    }
+
+    for (0..1000) |i| {
+        try fuzz(i, gpa);
     }
 }
 
@@ -23,10 +30,10 @@ fn fuzz(seed: u64, gpa: std.mem.Allocator) !void {
         doc.* = .{ i, .empty };
     }
 
-    for (0..20) |_| {
+    for (0..100) |_| {
         for (0..docs.len) |_| {
             const doc = &docs[random.uintLessThan(u32, docs.len)];
-            const len: u32 = @intCast(doc[1].snapshot.items.len);
+            const len: u32 = @intCast(doc[1].snapshot.size());
             const weight: f32 = if (len < 100) 0.65 else 0.35;
             if (len == 0 or random.float(f32) < weight) {
                 const char = random.intRangeAtMost(u8, 'a', 'z');
@@ -42,7 +49,7 @@ fn fuzz(seed: u64, gpa: std.mem.Allocator) !void {
         if (a != b) {
             try a[1].merge(gpa, b[1]);
             try b[1].merge(gpa, a[1]);
-            try std.testing.expectEqualSlices(u8, a[1].snapshot.items, b[1].snapshot.items);
+            try std.testing.expectEqualSlices(u8, a[1].snapshot.slice(), b[1].snapshot.slice());
         }
     }
 }

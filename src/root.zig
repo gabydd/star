@@ -92,7 +92,7 @@ pub const TextBuffer = struct {
     }
 
     pub fn left(text: *TextBuffer) void {
-        text.cursor = @intCast(std.math.clamp(text.cursor - 1, 0, text.size()));
+        text.cursor = @intCast(std.math.clamp(text.cursor -| 1, 0, text.size()));
     }
 
     pub fn right(text: *TextBuffer) void {
@@ -111,7 +111,7 @@ pub const TextBuffer = struct {
 
     pub fn delete(text: *TextBuffer, pos: usize) void {
         _ = text.buffer.orderedRemove(pos);
-        if (pos <= text.cursor) text.cursor -= 1;
+        if (pos < text.cursor) text.cursor -= 1;
     }
 
     pub fn slice(text: *TextBuffer) []const u8 {

@@ -73,32 +73,53 @@ pub fn acceptSocket(server: @This()) !void {
     try ping(server);
 }
 
-fn ping(server: @This()) !void {
-    var header: [2]u8 = .{ 0, 0 };
-    header[0] |= 0b10000000;
-    header[0] |= 0b00001001;
-    header[1] |= 0b00000100;
-    _ = try server.conn.stream.write(&header);
-    _ = try server.conn.stream.write("ping");
+pub fn ping(server: @This()) !void {
+    try server.write("ping", .ping);
 }
+
+pub fn pong(server: @This()) !void {
+    try server.write("pong", .pong);
+}
+
 const Opcode = std.http.WebSocket.Opcode;
-pub fn write(server: @This(), message: []const u8) !void {
+
+pub fn write(server: @This(), message: []const u8, opcode: Opcode) !void {
     var header: [2]u8 = .{ 0, 0 };
     header[0] |= 0b10000000;
-    header[0] |= @intFromEnum(Opcode.binary);
+    header[0] |= @intFromEnum(opcode);
     if (message.len > (1 << 16) - 1) {
         header[1] |= 127;
         const len = std.mem.nativeToBig(u64, @intCast(message.len));
-        _ = try server.conn.stream.writeAll(&header);
-        _ = try server.conn.stream.writeAll(std.mem.asBytes(&len));
+        try server.conn.stream.writeAll(&header);
+        try server.conn.stream.writeAll(std.mem.asBytes(&len));
     } else if (message.len > 125) {
         header[1] |= 126;
         const len = std.mem.nativeToBig(u16, @intCast(message.len));
-        _ = try server.conn.stream.writeAll(&header);
-        _ = try server.conn.stream.writeAll(std.mem.asBytes(&len));
+        try server.conn.stream.writeAll(&header);
+        try server.conn.stream.writeAll(std.mem.asBytes(&len));
     } else {
         header[1] |= @truncate(message.len);
-        _ = try server.conn.stream.writeAll(&header);
+        try server.conn.stream.writeAll(&header);
     }
-    _ = try server.conn.stream.writeAll(message);
+    try server.conn.stream.writeAll(message);
+}
+
+pub fn read(server: @This(), gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanaged(u8)) !Opcode {
+    const reader = server.conn.stream.reader();
+    const byte = try reader.readByte();
+    const opcode: Opcode = @enumFromInt(@as(u4, @truncate(byte)));
+    const byte2 = try reader.readByte();
+    const masked = (byte2 >> 7) == 1;
+    var length: u64 = byte2 & 0b01111111;
+    if (length == 126) {
+        length = try reader.readInt(u16, .big);
+    } else if (length == 127) {
+        length = try reader.readInt(u64, .big);
+    }
+    const mask = if (masked) try reader.readBytesNoEof(4) else .{ 0, 0, 0, 0 };
+    try buffer.ensureTotalCapacity(gpa, length);
+    for (0..length) |i| {
+        buffer.appendAssumeCapacity(try reader.readByte() ^ mask[i % 4]);
+    }
+    return opcode;
 }
