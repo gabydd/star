@@ -28,6 +28,9 @@ immutable storage
 crdts
   - https://inria.hal.science/inria-00555588/document
   - https://zed.dev/blog/crdts
+eg-walker
+  - https://arxiv.org/abs/2409.14252
+  - https://github.com/josephg/diamond-types
 
 # distrubuted systems
 
@@ -57,4 +60,9 @@ cjdns
 iroh
  - https://www.iroh.computer/
 
+# vision
 
+local first
+  - https://www.inkandswitch.com/essay/local-first/
+malleable software
+  - https://www.inkandswitch.com/essay/malleable-software/
