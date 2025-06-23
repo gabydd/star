@@ -77,6 +77,6 @@ pub fn build(b: *std.Build) void {
     wasm.rdynamic = true;
 
     const wasm_step = b.step("wasm", "build wasm module");
-    const install_file = b.addInstallFile(wasm.getEmittedBin(), "../web/star.wasm");
+    const install_file = b.addInstallFile(wasm.getEmittedBin(), "../web/src/star.wasm");
     wasm_step.dependOn(&install_file.step);
 }

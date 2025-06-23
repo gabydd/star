@@ -1,6 +1,7 @@
 const star = @import("star");
 const vaxis = @import("vaxis");
 const std = @import("std");
+const SocketServer = @import("websocket/Server.zig");
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const alloc = gpa.allocator();
@@ -10,27 +11,9 @@ pub fn main() !void {
 
     const socket_addr = try std.net.Address.initUnix("/home/gaby/temp/conn");
 
-    // var buffer1: star.TextBuffer = .empty;
-    // var buffer2: star.TextBuffer = .empty;
-    // var graph1: star.EventGraph = .empty;
-    // const agent1 = 0;
-    // var graph2: star.EventGraph = .empty;
-    // const agent2 = 1;
-    // try graph1.insert(alloc, agent1, 0, "hi");
-    // try graph2.insert(alloc, agent2, 0, "yooooo");
-    // try graph1.merge(alloc, graph2);
-    // try graph2.merge(alloc, graph1);
-    // try graph2.delete(alloc, agent2, 1, 1);
-    // try graph1.merge(alloc, graph2);
-    // try graph1.replay(alloc, &buffer1);
-    // std.debug.print("{s}\n", .{buffer1.items});
-    // try graph2.replay(alloc, &buffer2);
-    // std.debug.print("{s}\n", .{buffer2.items});
-
     var tty = try vaxis.Tty.init();
     defer tty.deinit();
     var vx = try vaxis.init(alloc, .{});
-    var stream: ?std.net.Stream = null;
     defer vx.deinit(alloc, tty.anyWriter());
 
     var loop: vaxis.Loop(Event) = .{
@@ -40,13 +23,14 @@ pub fn main() !void {
     try loop.init();
     if (std.fs.accessAbsolute("/home/gaby/temp/conn", .{})) {
         const socket = try std.net.connectUnixSocket("/home/gaby/temp/conn");
-        const thread = try std.Thread.spawn(.{}, pollSocket, .{ socket, &loop });
-        stream = socket;
+        const thread = try std.Thread.spawn(.{}, pollSocket, .{ alloc, socket, &loop, &graph.events });
         _ = thread;
     } else |_| {
         var server = try socket_addr.listen(.{});
-        const thread = try std.Thread.spawn(.{}, pollSocketServer, .{ &server, &loop, &stream });
+        const thread = try std.Thread.spawn(.{}, pollWebSocketServer, .{ &loop, &graph.events });
+        const thread2 = try std.Thread.spawn(.{}, pollSocketServer, .{ &server, &loop, &graph.events });
         _ = thread;
+        _ = thread2;
     }
 
     try loop.start();
@@ -56,50 +40,43 @@ pub fn main() !void {
 
     try vx.queryTerminal(tty.anyWriter(), 1 * std.time.ns_per_ms);
 
-    var cursor: u32 = 0;
     while (true) {
         var event = loop.nextEvent();
         switch (event) {
             .key_press => |key| {
                 if (key.matches('c', .{ .ctrl = true })) {
+                    try std.fs.deleteFileAbsolute("/home/gaby/temp/conn");
                     break;
                 } else if (key.matches(vaxis.Key.backspace, .{})) {
-                    if (cursor > 0) {
-                        try graph.delete(alloc, agent, cursor - 1, 1);
-                        cursor -= 1;
-                        if (stream) |s| try writeSocket(alloc, s, graph);
+                    if (graph.snapshot.cursor > 0) {
+                        try graph.delete(alloc, agent, graph.snapshot.cursor - 1, 1);
                     }
                 } else if (key.matches(vaxis.Key.left, .{})) {
-                    cursor = @intCast(std.math.clamp(cursor - 1, 0, graph.snapshot.items.len));
+                    graph.snapshot.left();
                 } else if (key.matches(vaxis.Key.right, .{})) {
-                    cursor = @intCast(std.math.clamp(cursor + 1, 0, graph.snapshot.items.len));
+                    graph.snapshot.right();
                 } else if (key.matches(vaxis.Key.enter, .{})) {
-                    try graph.insert(alloc, agent, cursor, "\n");
-                    cursor += 1;
-                    if (stream) |s| try writeSocket(alloc, s, graph);
+                    try graph.insert(alloc, agent, graph.snapshot.cursor, "\n");
                 } else {
                     if (key.text) |text| {
-                        try graph.insert(alloc, agent, cursor, text);
-                        cursor += @intCast(text.len);
-                        if (stream) |s| try writeSocket(alloc, s, graph);
+                        try graph.insert(alloc, agent, graph.snapshot.cursor, text);
                     }
                 }
             },
             .winsize => |ws| try vx.resize(alloc, tty.anyWriter(), ws),
             .graph => |*other| {
                 try graph.merge(alloc, other.*);
-                cursor = @intCast(std.math.clamp(cursor, 0, graph.snapshot.items.len));
             },
         }
         const win = vx.window();
         win.clear();
         var col: u16 = 0;
         var line: u16 = 0;
-        for (graph.snapshot.items, 0..) |*c, i| {
+        for (graph.snapshot.slice(), 0..) |*c, i| {
             if (c.* == '\n') {
                 const cell: vaxis.Cell = .{
                     .char = .{ .grapheme = "⏎" },
-                    .style = .{ .bg = if (i == cursor) .{ .rgb = .{ 120, 120, 120 } } else .default },
+                    .style = .{ .bg = if (i == graph.snapshot.cursor) .{ .rgb = .{ 120, 120, 120 } } else .default },
                 };
                 win.writeCell(col, line, cell);
                 col = 0;
@@ -107,7 +84,7 @@ pub fn main() !void {
             } else {
                 const cell: vaxis.Cell = .{
                     .char = .{ .grapheme = c[0..1] },
-                    .style = .{ .bg = if (i == cursor) .{ .rgb = .{ 120, 120, 120 } } else .default },
+                    .style = .{ .bg = if (i == graph.snapshot.cursor) .{ .rgb = .{ 120, 120, 120 } } else .default },
                 };
                 win.writeCell(col, line, cell);
 
@@ -130,26 +107,66 @@ fn writeTo(T: type, buffer: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocato
     try buffer.appendSlice(alloc, &val);
 }
 
-fn writeSocket(alloc: std.mem.Allocator, stream: std.net.Stream, graph: star.EventGraph) !void {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(alloc);
-    try graph.toBytes(alloc, &buffer);
-    try stream.writeAll(buffer.items);
+fn accept(gpa: std.mem.Allocator, conn: std.net.Server.Connection, loop: *vaxis.Loop(Event), events: *std.ArrayListUnmanaged(star.Event)) !void {
+    _ = loop;
+    var len: usize = 0;
+    const socket: SocketServer = .{ .conn = conn };
+    try socket.acceptSocket();
+    while (true) {
+        // poll socket
+        if (events.items.len > len) {
+            var buffer: std.ArrayListUnmanaged(u8) = .empty;
+            defer buffer.deinit(gpa);
+            try star.eventsToBytes(events.*, gpa, &buffer);
+            try socket.write(buffer.items);
+            len = events.items.len;
+        }
+    }
 }
 
-fn pollSocketServer(server: *std.net.Server, loop: *vaxis.Loop(Event), stream: *?std.net.Stream) !void {
-    const peer = try server.accept();
-    stream.* = peer.stream;
-    try pollSocket(peer.stream, loop);
-}
-
-fn pollSocket(stream: std.net.Stream, loop: *vaxis.Loop(Event)) !void {
+fn pollWebSocketServer(loop: *vaxis.Loop(Event), events: *std.ArrayListUnmanaged(star.Event)) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const alloc = gpa.allocator();
-    const buffer = try alloc.alloc(u8, 1024 * 1024);
+
+    const address = try std.net.Address.resolveIp("0.0.0.0", 1999);
+    var web = try address.listen(.{ .reuse_address = true });
     while (true) {
-        const size = try stream.read(buffer);
-        loop.postEvent(.{ .graph = try .fromBytes(alloc, buffer[0..size]) });
+        const conn = try web.accept();
+        const thread = try std.Thread.spawn(.{}, accept, .{
+            alloc,
+            conn,
+            loop,
+            events,
+        });
+        thread.detach();
+    }
+}
+
+fn pollSocketServer(server: *std.net.Server, loop: *vaxis.Loop(Event), events: *std.ArrayListUnmanaged(star.Event)) !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const alloc = gpa.allocator();
+
+    const peer = try server.accept();
+    try pollSocket(alloc, peer.stream, loop, events);
+}
+
+fn pollSocket(alloc: std.mem.Allocator, stream: std.net.Stream, loop: *vaxis.Loop(Event), events: *std.ArrayListUnmanaged(star.Event)) !void {
+    const buffer = try alloc.alloc(u8, 1024 * 1024);
+    var len: usize = 0;
+    var polls: [1]std.posix.pollfd = .{.{ .fd = stream.handle, .events = std.posix.POLL.IN, .revents = undefined }};
+    while (true) {
+        const s = try std.posix.poll(&polls, 0);
+        if (s > 0 and polls[0].revents == std.posix.POLL.IN) {
+            const size = try stream.read(buffer);
+            loop.postEvent(.{ .graph = try .fromBytes(alloc, buffer[0..size]) });
+        }
+        if (events.items.len > len) {
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            defer buf.deinit(alloc);
+            try star.eventsToBytes(events.*, alloc, &buf);
+            try stream.writeAll(buf.items);
+            len = events.items.len;
+        }
     }
 }
 

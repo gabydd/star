@@ -6,7 +6,16 @@ const Wrapper = struct {
     agent: star.Agent,
 };
 
-extern fn returnSlice(ptr: [*]u8, len: usize) void;
+extern fn returnSlice(ptr: [*]const u8, len: usize) void;
+
+export fn alloc(n: usize) [*]u8 {
+    return (std.heap.wasm_allocator.alloc(u8, n) catch @panic("OOM")).ptr;
+}
+
+export fn free(ptr: [*]u8, len: usize) void {
+    std.heap.wasm_allocator.free(ptr[0..len]);
+}
+
 export fn createWrapper(agent: star.Agent) *Wrapper {
     const wrapper = std.heap.wasm_allocator.create(Wrapper) catch @panic("OOM");
     wrapper.* = .{
@@ -21,7 +30,11 @@ export fn destroyWrapper(wrapper: *Wrapper) void {
 }
 
 export fn snapshot(wrapper: *Wrapper) void {
-    returnSlice(wrapper.graph.snapshot.items.ptr, wrapper.graph.snapshot.items.len);
+    returnSlice(wrapper.graph.snapshot.slice().ptr, wrapper.graph.snapshot.size());
+}
+
+export fn cursor(wrapper: *Wrapper) u32 {
+    return wrapper.graph.snapshot.cursor;
 }
 
 export fn insert(wrapper: *Wrapper, pos: u32, text: [*]u8, text_len: usize) void {
@@ -34,7 +47,7 @@ export fn delete(wrapper: *Wrapper, pos: u32, count: u32) void {
 
 export fn toBytes(wrapper: *Wrapper) void {
     var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    wrapper.graph.toBytes(std.heap.wasm_allocator, &buffer) catch @panic("OOM");
+    star.eventsToBytes(wrapper.graph.events, std.heap.wasm_allocator, &buffer) catch @panic("OOM");
 
     returnSlice(buffer.items.ptr, buffer.items.len);
 }

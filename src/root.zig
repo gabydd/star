@@ -17,7 +17,7 @@ pub const Op = union(OpType) {
 
 pub const EventId = u32;
 
-const Event = struct {
+pub const Event = struct {
     agent: Agent,
     seq: u32,
     parents: []EventId,
@@ -80,7 +80,48 @@ const CRDTState = struct {
 
 pub const Agent = u64;
 
-pub const TextBuffer = std.ArrayListUnmanaged(u8);
+pub const TextBuffer = struct {
+    buffer: std.ArrayListUnmanaged(u8),
+    cursor: u32,
+    const empty: TextBuffer = .{
+        .buffer = .empty,
+        .cursor = 0,
+    };
+    pub fn deinit(text: *TextBuffer, gpa: std.mem.Allocator) void {
+        text.buffer.deinit(gpa);
+    }
+
+    pub fn left(text: *TextBuffer) void {
+        text.cursor = @intCast(std.math.clamp(text.cursor - 1, 0, text.size()));
+    }
+
+    pub fn right(text: *TextBuffer) void {
+        text.cursor = @intCast(std.math.clamp(text.cursor + 1, 0, text.size()));
+    }
+
+    pub fn insert(text: *TextBuffer, gpa: std.mem.Allocator, pos: usize, char: u8) !void {
+        try text.buffer.insert(gpa, pos, char);
+        if (pos <= text.cursor) text.cursor += 1;
+    }
+
+    pub fn insertSlice(text: *TextBuffer, gpa: std.mem.Allocator, pos: usize, items: []const u8) !void {
+        try text.buffer.insertSlice(gpa, pos, items);
+        if (pos <= text.cursor) text.cursor += @intCast(items.len);
+    }
+
+    pub fn delete(text: *TextBuffer, pos: usize) void {
+        _ = text.buffer.orderedRemove(pos);
+        if (pos <= text.cursor) text.cursor -= 1;
+    }
+
+    pub fn slice(text: *TextBuffer) []const u8 {
+        return text.buffer.items;
+    }
+
+    pub fn size(text: *TextBuffer) usize {
+        return text.buffer.items.len;
+    }
+};
 pub const EventGraph = struct {
     events: std.ArrayListUnmanaged(Event),
     frontier: std.ArrayListUnmanaged(EventId),
@@ -138,7 +179,7 @@ pub const EventGraph = struct {
     pub fn delete(graph: *EventGraph, gpa: std.mem.Allocator, agent: Agent, pos: u32, len: u32) !void {
         for (0..len) |_| {
             try graph.addLocalOp(gpa, agent, .{ .del = .{ .pos = pos } });
-            _ = graph.snapshot.orderedRemove(pos);
+            graph.snapshot.delete(pos);
         }
     }
 
@@ -378,7 +419,7 @@ pub const EventGraph = struct {
                 const item = graph.state.items.items[idx];
                 if (!item.deleted) {
                     item.deleted = true;
-                    if (snapshot) |snap| _ = snap.orderedRemove(end_pos);
+                    if (snapshot) |snap| snap.delete(end_pos);
                 }
                 item.prepare_state = @enumFromInt(2);
                 try graph.state.delete_map.put(gpa, i, item.id);
@@ -510,30 +551,29 @@ pub const EventGraph = struct {
         }
         return graph;
     }
-
-    pub fn toBytes(graph: EventGraph, gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanaged(u8)) !void {
-        try writeTo(u32, buffer, gpa, @intCast(graph.events.items.len));
-        for (graph.events.items) |event| {
-            try writeTo(Agent, buffer, gpa, event.agent);
-            try writeTo(u32, buffer, gpa, event.seq);
-            try writeTo(u32, buffer, gpa, @intCast(event.parents.len));
-            for (event.parents) |parent| {
-                try writeTo(EventId, buffer, gpa, parent);
-            }
-            switch (event.op) {
-                .del => |del| {
-                    try writeTo(u8, buffer, gpa, @intFromEnum(OpType.del));
-                    try writeTo(u32, buffer, gpa, del.pos);
-                },
-                .ins => |ins| {
-                    try writeTo(u8, buffer, gpa, @intFromEnum(OpType.ins));
-                    try writeTo(u32, buffer, gpa, ins.pos);
-                    try writeTo(u8, buffer, gpa, ins.content);
-                },
-            }
+};
+pub fn eventsToBytes(events: std.ArrayListUnmanaged(Event), gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanaged(u8)) !void {
+    try writeTo(u32, buffer, gpa, @intCast(events.items.len));
+    for (events.items) |event| {
+        try writeTo(Agent, buffer, gpa, event.agent);
+        try writeTo(u32, buffer, gpa, event.seq);
+        try writeTo(u32, buffer, gpa, @intCast(event.parents.len));
+        for (event.parents) |parent| {
+            try writeTo(EventId, buffer, gpa, parent);
+        }
+        switch (event.op) {
+            .del => |del| {
+                try writeTo(u8, buffer, gpa, @intFromEnum(OpType.del));
+                try writeTo(u32, buffer, gpa, del.pos);
+            },
+            .ins => |ins| {
+                try writeTo(u8, buffer, gpa, @intFromEnum(OpType.ins));
+                try writeTo(u32, buffer, gpa, ins.pos);
+                try writeTo(u8, buffer, gpa, ins.content);
+            },
         }
     }
-};
+}
 
 const ByteReader = struct {
     bytes: []const u8,
